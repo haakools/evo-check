@@ -1,0 +1,474 @@
+#!/usr/bin/env node
+
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const readline = require('readline');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const execAsync = promisify(exec);
+
+const BASE_URL = 'https://visits.evofitness.no';
+const OPERATOR_ID = '5336003e-0105-4402-809f-93bf6498af34';
+const FAVORITES_FILE = path.join(os.homedir(), '.gym-favorites.json');
+
+// ANSI color codes
+const colors = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  dim: '\x1b[2m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  cyan: '\x1b[36m',
+  white: '\x1b[37m',
+};
+
+class GymTUI {
+  constructor() {
+    this.locations = [];
+    this.selectedLocation = null;
+    this.favorites = this.loadFavorites();
+    this.watchMode = false;
+  }
+
+  loadFavorites() {
+    try {
+      if (fs.existsSync(FAVORITES_FILE)) {
+        return JSON.parse(fs.readFileSync(FAVORITES_FILE, 'utf8'));
+      }
+    } catch (e) {
+      // Ignore errors
+    }
+    return [];
+  }
+
+  saveFavorites() {
+    try {
+      fs.writeFileSync(FAVORITES_FILE, JSON.stringify(this.favorites, null, 2));
+    } catch (e) {
+      console.error(colors.red + 'Failed to save favorites: ' + e.message + colors.reset);
+    }
+  }
+
+  toggleFavorite(locationId) {
+    const index = this.favorites.indexOf(locationId);
+    if (index > -1) {
+      this.favorites.splice(index, 1);
+    } else {
+      this.favorites.push(locationId);
+    }
+    this.saveFavorites();
+  }
+
+  isFavorite(locationId) {
+    return this.favorites.includes(locationId);
+  }
+
+  async fetchLocations() {
+    try {
+      const { stdout } = await execAsync(
+        `curl -s -H "Accept: application/json" "${BASE_URL}/api/v1/locations?operator=${OPERATOR_ID}"`
+      );
+      
+      if (stdout.trim().startsWith('<!DOCTYPE') || stdout.trim().startsWith('<html')) {
+        throw new Error('API returned HTML instead of JSON. Check if the URL is correct.');
+      }
+      
+      return JSON.parse(stdout);
+    } catch (error) {
+      throw new Error(`Failed to fetch locations: ${error.message}`);
+    }
+  }
+
+  async fetchOccupancy(locationId) {
+    try {
+      const { stdout } = await execAsync(
+        `curl -s -H "Accept: application/json" "${BASE_URL}/api/v1/locations/${locationId}/current"`
+      );
+      
+      if (stdout.trim().startsWith('<!DOCTYPE') || stdout.trim().startsWith('<html')) {
+        throw new Error('API returned HTML instead of JSON');
+      }
+      
+      return JSON.parse(stdout);
+    } catch (error) {
+      throw new Error(`Failed to fetch occupancy: ${error.message}`);
+    }
+  }
+
+  async fetchTimeline(locationId) {
+    try {
+      const { stdout } = await execAsync(
+        `curl -s -H "Accept: application/json" "${BASE_URL}/api/v1/locations/${locationId}/timeline"`
+      );
+      
+      if (stdout.trim().startsWith('<!DOCTYPE') || stdout.trim().startsWith('<html')) {
+        throw new Error('API returned HTML instead of JSON');
+      }
+      
+      return JSON.parse(stdout);
+    } catch (error) {
+      throw new Error(`Failed to fetch timeline: ${error.message}`);
+    }
+  }
+
+  clearScreen() {
+    console.clear();
+  }
+
+  drawHeader() {
+    console.log(colors.bright + colors.cyan + '╔══════════════════════════════════════════════════╗' + colors.reset);
+    console.log(colors.bright + colors.cyan + '║' + colors.reset + colors.bright + '           EVO FITNESS GYM CHECKER                ' + colors.cyan + '║' + colors.reset);
+    console.log(colors.bright + colors.cyan + '╚══════════════════════════════════════════════════╝' + colors.reset);
+    console.log();
+  }
+
+  drawProgressBar(percentage, length = 30) {
+    const filled = Math.floor(length * percentage / 100);
+    const empty = length - filled;
+    
+    let color;
+    if (percentage >= 100) color = colors.red;
+    else if (percentage >= 75) color = colors.yellow;
+    else color = colors.green;
+
+    return color + '█'.repeat(filled) + colors.dim + '░'.repeat(empty) + colors.reset;
+  }
+
+  drawMiniBar(percentage, length = 10) {
+    const filled = Math.floor(length * percentage / 100);
+    const empty = length - filled;
+    
+    let color;
+    if (percentage >= 100) color = colors.red;
+    else if (percentage >= 75) color = colors.yellow;
+    else color = colors.green;
+
+    return color + '▓'.repeat(filled) + colors.dim + '░'.repeat(empty) + colors.reset;
+  }
+
+  getStatusText(percentage) {
+    if (percentage >= 100) return colors.red + 'FULL' + colors.reset;
+    if (percentage >= 75) return colors.yellow + 'BUSY' + colors.reset;
+    if (percentage >= 50) return colors.yellow + 'MODERATE' + colors.reset;
+    return colors.green + 'AVAILABLE' + colors.reset;
+  }
+
+  formatTime(timeString) {
+    // Expects format like "2024-01-10T14:00:00Z"
+    if (!timeString) return '??:??';
+    try {
+      const date = new Date(timeString);
+      return date.toLocaleTimeString('no-NO', { hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+      return timeString;
+    }
+  }
+
+  displayOccupancy(location, current, timeline) {
+    this.clearScreen();
+    this.drawHeader();
+
+    const currentData = current.current || 0;
+    const percentage = current.percentageUsed || 0;
+    const statusText = this.getStatusText(percentage);
+    const isFav = this.isFavorite(location.id);
+
+    // Remove "EVO " prefix from display
+    const displayName = location.name.replace(/^EVO\s+/i, '');
+
+    console.log(colors.bright + `  Location: ${colors.cyan}${displayName}${colors.reset} ${isFav ? colors.yellow + '★' + colors.reset : ''}`);
+    console.log();
+    console.log(colors.bright + `  People Now:  ${colors.white}${currentData}${colors.reset}`);
+    console.log(colors.bright + `  Capacity:    ${colors.white}${percentage}%${colors.reset}`);
+    console.log();
+    console.log(`  [${this.drawProgressBar(percentage)}]`);
+    console.log();
+    console.log(colors.bright + `  Status: ${statusText}${colors.reset}`);
+    console.log();
+    
+    // Display timeline
+    if (timeline && timeline.timeline && timeline.timeline.length > 0) {
+      console.log(colors.dim + '─'.repeat(54) + colors.reset);
+      console.log();
+      console.log(colors.bright + '  Today\'s Activity:' + colors.reset);
+      console.log();
+      
+      timeline.timeline.forEach(slot => {
+        const time = this.formatTime(slot.timestamp);
+        const pct = slot.percentageUsed || 0;
+        const bar = this.drawMiniBar(pct, 20);
+        console.log(`  ${colors.dim}${time}${colors.reset}  [${bar}] ${pct}%`);
+      });
+      console.log();
+    }
+
+    console.log(colors.dim + '─'.repeat(54) + colors.reset);
+    console.log();
+    console.log('  ' + colors.dim + '[R]efresh  [S]witch  [F]avorite  [W]atch  [Q]uit' + colors.reset);
+    console.log();
+  }
+
+  displayCompactView(location, current, timeline) {
+    const currentData = current.current || 0;
+    const percentage = current.percentageUsed || 0;
+    const displayName = location.name.replace(/^EVO\s+/i, '');
+    const bar = this.drawProgressBar(percentage, 20);
+    const time = new Date().toLocaleTimeString('no-NO', { hour: '2-digit', minute: '2-digit' });
+
+    console.log(`${colors.cyan}${displayName}${colors.reset} (${time})`);
+    console.log(`Now: ${currentData} people | ${percentage}% | [${bar}]`);
+    
+    if (timeline && timeline.timeline && timeline.timeline.length > 0) {
+      console.log('\nToday:');
+      timeline.timeline.forEach(slot => {
+        const t = this.formatTime(slot.timestamp);
+        const pct = slot.percentageUsed || 0;
+        const miniBar = this.drawMiniBar(pct, 15);
+        console.log(`${t} [${miniBar}] ${pct}%`);
+      });
+    }
+    console.log();
+  }
+
+  displayLocationList(searchTerm = '') {
+    this.clearScreen();
+    this.drawHeader();
+
+    console.log(colors.bright + '  Select a location:' + colors.reset);
+    console.log();
+
+    // Show favorites first
+    const favLocations = this.locations.filter(loc => this.isFavorite(loc.id));
+    const otherLocations = this.locations.filter(loc => !this.isFavorite(loc.id));
+
+    const filtered = [...favLocations, ...otherLocations].filter(loc => {
+      const name = loc.name.toLowerCase();
+      const search = searchTerm.toLowerCase();
+      
+      // Split search term into parts
+      const searchParts = search.split(/\s+/).filter(p => p.length > 0);
+      
+      // Check if all search parts are found in the location name
+      return searchParts.every(part => name.includes(part));
+    });
+
+    if (filtered.length === 0) {
+      console.log(colors.yellow + '  No locations found matching "' + searchTerm + '"' + colors.reset);
+      console.log();
+    } else {
+      let displayedFavHeader = false;
+      let displayedOthersHeader = false;
+      
+      filtered.forEach((loc, idx) => {
+        const isFav = this.isFavorite(loc.id);
+        
+        if (isFav && !displayedFavHeader && favLocations.length > 0) {
+          console.log(colors.dim + '  Favorites:' + colors.reset);
+          displayedFavHeader = true;
+        } else if (!isFav && !displayedOthersHeader && otherLocations.length > 0 && favLocations.length > 0) {
+          console.log();
+          console.log(colors.dim + '  Other Locations:' + colors.reset);
+          displayedOthersHeader = true;
+        }
+        
+        // Remove "EVO " prefix from display
+        const displayName = loc.name.replace(/^EVO\s+/i, '');
+        const star = isFav ? colors.yellow + '★ ' + colors.reset : '  ';
+        console.log(`  ${star}${colors.cyan}${idx + 1}.${colors.reset} ${displayName}`);
+      });
+      console.log();
+    }
+
+    if (searchTerm) {
+      console.log(colors.dim + `  Searching for: "${searchTerm}"` + colors.reset);
+    }
+    
+    return filtered;
+  }
+
+  async selectLocation() {
+    return new Promise((resolve) => {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+
+      let searchTerm = '';
+      let filtered = this.displayLocationList(searchTerm);
+
+      const handleInput = (char) => {
+        if (char === '\r' || char === '\n') {
+          // Enter pressed
+          if (filtered.length === 1) {
+            rl.close();
+            resolve(filtered[0]);
+          }
+        } else if (char === '\u007F' || char === '\b') {
+          // Backspace
+          searchTerm = searchTerm.slice(0, -1);
+          filtered = this.displayLocationList(searchTerm);
+        } else if (char === '\u0003') {
+          // Ctrl+C
+          rl.close();
+          process.exit(0);
+        } else if (char >= '0' && char <= '9') {
+          const num = parseInt(char);
+          if (num > 0 && num <= filtered.length) {
+            rl.close();
+            resolve(filtered[num - 1]);
+          } else {
+            searchTerm += char;
+            filtered = this.displayLocationList(searchTerm);
+          }
+        } else if (char.match(/[a-zA-ZæøåÆØÅ\s]/)) {
+          searchTerm += char;
+          filtered = this.displayLocationList(searchTerm);
+        }
+      };
+
+      readline.emitKeypressEvents(process.stdin);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+      }
+
+      process.stdin.on('keypress', (str, key) => {
+        if (key.ctrl && key.name === 'c') {
+          process.exit(0);
+        }
+        handleInput(str);
+      });
+    });
+  }
+
+  async monitorLocation(location) {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+
+    readline.emitKeypressEvents(process.stdin);
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+
+    const refresh = async () => {
+      try {
+        const [current, timeline] = await Promise.all([
+          this.fetchOccupancy(location.id),
+          this.fetchTimeline(location.id)
+        ]);
+        this.displayOccupancy(location, current, timeline);
+      } catch (err) {
+        console.error(colors.red + 'Error fetching data: ' + err.message + colors.reset);
+      }
+    };
+
+    await refresh();
+
+    process.stdin.on('keypress', async (str, key) => {
+      if (key.ctrl && key.name === 'c' || key.name === 'q') {
+        rl.close();
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+        process.exit(0);
+      } else if (key.name === 'r') {
+        await refresh();
+      } else if (key.name === 'f') {
+        this.toggleFavorite(location.id);
+        await refresh();
+      } else if (key.name === 'w') {
+        rl.close();
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+        await this.startWatchMode(location);
+      } else if (key.name === 's') {
+        rl.close();
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+        await this.run();
+      }
+    });
+  }
+
+  async startWatchMode(location) {
+    this.watchMode = true;
+    console.log(colors.dim + '\nStarting watch mode (refreshes every 30 minutes)...' + colors.reset);
+    console.log(colors.dim + 'Press Ctrl+C to exit' + colors.reset);
+    console.log();
+
+    const refresh = async () => {
+      try {
+        const [current, timeline] = await Promise.all([
+          this.fetchOccupancy(location.id),
+          this.fetchTimeline(location.id)
+        ]);
+        console.clear();
+        this.displayCompactView(location, current, timeline);
+      } catch (err) {
+        console.error(colors.red + 'Error: ' + err.message + colors.reset);
+      }
+    };
+
+    // Initial fetch
+    await refresh();
+
+    // Refresh every 30 minutes
+    setInterval(refresh, 30 * 60 * 1000);
+
+    // Keep the process alive
+    process.stdin.resume();
+  }
+
+  async run() {
+    // Check for command line args
+    const args = process.argv.slice(2);
+    
+    if (args.includes('--watch') || args.includes('-w')) {
+      // Watch mode with favorite
+      console.log(colors.dim + 'Loading...' + colors.reset);
+      this.locations = await this.fetchLocations();
+      
+      if (this.favorites.length === 0) {
+        console.error(colors.red + 'No favorites set. Please select a location and press F to favorite it first.' + colors.reset);
+        process.exit(1);
+      }
+      
+      const favoriteLocation = this.locations.find(loc => loc.id === this.favorites[0]);
+      if (!favoriteLocation) {
+        console.error(colors.red + 'Favorite location not found.' + colors.reset);
+        process.exit(1);
+      }
+      
+      await this.startWatchMode(favoriteLocation);
+      return;
+    }
+
+    try {
+      console.log(colors.dim + 'Loading locations...' + colors.reset);
+      this.locations = await this.fetchLocations();
+      
+      const location = await this.selectLocation();
+      await this.monitorLocation(location);
+    } catch (err) {
+      console.error(colors.red + '\nError: ' + err.message + colors.reset);
+      console.error(colors.dim + '\nTroubleshooting:' + colors.reset);
+      console.error(colors.dim + '  1. Check your internet connection' + colors.reset);
+      console.error(colors.dim + '  2. Verify curl is installed: curl --version' + colors.reset);
+      console.error(colors.dim + '  3. Test the API manually:' + colors.reset);
+      console.error(colors.dim + `     curl "${BASE_URL}/api/v1/locations?operator=${OPERATOR_ID}"` + colors.reset);
+      console.log();
+      process.exit(1);
+    }
+  }
+}
+
+// Run the app
+const app = new GymTUI();
+app.run();
