@@ -109,7 +109,8 @@ class GymTUI {
         throw new Error('API returned HTML instead of JSON');
       }
       
-      return JSON.parse(stdout);
+      const data = JSON.parse(stdout);
+      return data;
     } catch (error) {
       throw new Error(`Failed to fetch timeline: ${error.message}`);
     }
@@ -157,15 +158,16 @@ class GymTUI {
     return colors.green + 'AVAILABLE' + colors.reset;
   }
 
-  formatTime(timeString) {
-    // Expects format like "2024-01-10T14:00:00Z"
-    if (!timeString) return '??:??';
-    try {
-      const date = new Date(timeString);
-      return date.toLocaleTimeString('no-NO', { hour: '2-digit', minute: '2-digit' });
-    } catch (e) {
-      return timeString;
-    }
+  formatTimeRange(begin, end) {
+    const padZero = (num) => String(num).padStart(2, '0');
+    return `${padZero(begin)}:00-${padZero(end)}:00`;
+  }
+
+  getIntervalStatus(status) {
+    if (status === 'current') return colors.cyan + '●' + colors.reset;
+    if (status === 'historic') return colors.dim + '○' + colors.reset;
+    if (status === 'future') return colors.dim + '○' + colors.reset;
+    return '○';
   }
 
   displayOccupancy(location, current, timeline) {
@@ -173,7 +175,7 @@ class GymTUI {
     this.drawHeader();
 
     const currentData = current.current || 0;
-    const percentage = current.percentageUsed || 0;
+    const percentage = (current.percentageUsed || 0).toFixed(2);
     const statusText = this.getStatusText(percentage);
     const isFav = this.isFavorite(location.id);
 
@@ -190,18 +192,20 @@ class GymTUI {
     console.log(colors.bright + `  Status: ${statusText}${colors.reset}`);
     console.log();
     
-    // Display timeline
-    if (timeline && timeline.timeline && timeline.timeline.length > 0) {
+    // Display timeline intervals
+    if (timeline && timeline.intervals && timeline.intervals.length > 0) {
       console.log(colors.dim + '─'.repeat(54) + colors.reset);
       console.log();
-      console.log(colors.bright + '  Today\'s Activity:' + colors.reset);
+      console.log(colors.bright + '  Today\'s Timeline:' + colors.reset);
       console.log();
       
-      timeline.timeline.forEach(slot => {
-        const time = this.formatTime(slot.timestamp);
-        const pct = slot.percentageUsed || 0;
+      timeline.intervals.forEach(interval => {
+        const timeRange = this.formatTimeRange(interval.begin, interval.end);
+        const pct = (interval.percentageUsed || 0).toFixed(1);
         const bar = this.drawMiniBar(pct, 20);
-        console.log(`  ${colors.dim}${time}${colors.reset}  [${bar}] ${pct}%`);
+        const statusIcon = this.getIntervalStatus(interval.status);
+        
+        console.log(`  ${statusIcon} ${colors.dim}${timeRange}${colors.reset}  [${bar}] ${pct}%`);
       });
       console.log();
     }
@@ -222,13 +226,14 @@ class GymTUI {
     console.log(`${colors.cyan}${displayName}${colors.reset} (${time})`);
     console.log(`Now: ${currentData} people | ${percentage}% | [${bar}]`);
     
-    if (timeline && timeline.timeline && timeline.timeline.length > 0) {
+    if (timeline && timeline.intervals && timeline.intervals.length > 0) {
       console.log('\nToday:');
-      timeline.timeline.forEach(slot => {
-        const t = this.formatTime(slot.timestamp);
-        const pct = slot.percentageUsed || 0;
+      timeline.intervals.forEach(interval => {
+        const timeRange = this.formatTimeRange(interval.begin, interval.end);
+        const pct = (interval.percentageUsed || 0).toFixed(1);
         const miniBar = this.drawMiniBar(pct, 15);
-        console.log(`${t} [${miniBar}] ${pct}%`);
+        const statusIcon = this.getIntervalStatus(interval.status);
+        console.log(`${statusIcon} ${timeRange} [${miniBar}] ${pct}%`);
       });
     }
     console.log();
@@ -363,6 +368,7 @@ class GymTUI {
         ]);
         this.displayOccupancy(location, current, timeline);
       } catch (err) {
+        console.error(colors.red + 'Error fetching data: ' + location.id);
         console.error(colors.red + 'Error fetching data: ' + err.message + colors.reset);
       }
     };
